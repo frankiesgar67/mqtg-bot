@@ -3,6 +3,7 @@ package users
 import (
 	"fmt"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	paho "github.com/eclipse/paho.mqtt.golang" // Alias paho per risolvere il tipo undefined
 	"gorm.io/gorm"
 	"log"
 	"mqtg-bot/internal/common"
@@ -65,15 +66,15 @@ func (user *User) Back() []byte {
 	user.state.Reset()
 	user.menu.Back()
 	messageData := []byte(user.menu.CurrPath.GetName())
-	user.menu.Back()   // two times back
-	return messageData // and then forward
+	user.menu.Back()   // due volte indietro per la navigazione corretta
+	return messageData // e poi avanti
 }
 
 func (user *User) subscribe(newSubscription *models.Subscription) int32 {
 	user.db.Create(newSubscription)
 	user.mqtt.Subscribe(newSubscription)
 	user.Subscriptions = append(user.Subscriptions, newSubscription)
-	log.Printf("User %v (Chat.ID %v) subscribed to the topic %v, new subscription: %+v", user.UserName, user.ChatID, newSubscription.Topic, *newSubscription)
+	log.Printf("User %v (Chat.ID %v) subscribed to the topic %v", user.UserName, user.ChatID, newSubscription.Topic)
 
 	return int32(len(user.Subscriptions) - 1)
 }
@@ -120,29 +121,45 @@ func (user *User) getMainMenu() *tgbotapi.ReplyKeyboardMarkup {
 	return user.menu.GetCurrPathMainMenu()
 }
 
+// connectMqttAndSubscribe gestisce la connessione e imposta il ripristino automatico delle sottoscrizioni
 func (user *User) connectMqttAndSubscribe() error {
+	// Definiamo cosa fare quando il client si riconnette al broker
+	onConnect := func(c paho.Client) { 
+		log.Printf("🔄 MQTT Reconnected for user %v. Restoring %d subscriptions...", user.UserName, len(user.Subscriptions))
+		
+		user.Lock()
+		// Copia delle sottoscrizioni per evitare problemi di concorrenza (Race Conditions)
+		subs := make([]*models.Subscription, len(user.Subscriptions))
+		copy(subs, user.Subscriptions)
+		user.Unlock()
+
+		for _, subscription := range subs {
+			subscription.UserMutex = &user.Mutex
+			if user.mqtt != nil {
+				user.mqtt.Subscribe(subscription)
+				log.Printf("📡 Restored subscription to: %s", subscription.Topic)
+			}
+		}
+	}
+
 	var err error
-	user.mqtt, err = mqtt.Connect(user.DbUser, user.subscriptionCh)
+	// Passiamo onConnect alla nostra funzione Connect locale nel pacchetto mqtt
+	user.mqtt, err = mqtt.Connect(user.DbUser, user.subscriptionCh, onConnect)
 	if err != nil {
 		return err
 	}
+
 	user.setConnected(true)
 	user.saveMqttUrl()
-	log.Printf("Connect user %v (Chat.ID %v) to mqtt", user.UserName, user.ChatID)
-
-	for _, subscription := range user.Subscriptions {
-		log.Printf("Subscribe user %v (Chat.ID %v) to the topic %v", user.UserName, user.ChatID, subscription.Topic)
-		subscription.UserMutex = &user.Mutex
-		user.mqtt.Subscribe(subscription)
-	}
-
+	log.Printf("✅ Connect user %v (Chat.ID %v) to mqtt", user.UserName, user.ChatID)
+	
 	return nil
 }
 
 func (user *User) SaveMenuIntoDB() {
 	jsonMenu, err := user.menu.Marshal()
 	if err != nil {
-		log.Printf("Menu marshal error: %v. Menu: %#v", err, user.menu.UserButtons)
+		log.Printf("Menu marshal error: %v", err)
 		return
 	}
 	user.DbMenu = jsonMenu
@@ -150,9 +167,9 @@ func (user *User) SaveMenuIntoDB() {
 }
 
 func (user *User) processConnectionString(mqttUrl string) *common.BotMessage {
-	user.disconnectMQTT() // to synchronize flags
+	user.disconnectMQTT() // Sincronizza lo stato disconnettendo sessioni orfane
 
-	if len(mqttUrl) > 0 { // will use old string if its called from callback
+	if len(mqttUrl) > 0 { 
 		user.MqttUrl = mqttUrl
 	}
 	err := user.connectMqttAndSubscribe()

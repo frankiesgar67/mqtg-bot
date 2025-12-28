@@ -16,19 +16,20 @@ import (
 
 type TelegramBot struct {
 	*tgbotapi.BotAPI
-	db             *gorm.DB
-	updates        tgbotapi.UpdatesChannel
-	subscriptionCh chan mqtt.SubscriptionMessage
-	usersManager   *users.Manager
+	db              *gorm.DB
+	updates         tgbotapi.UpdatesChannel
+	subscriptionCh  chan mqtt.SubscriptionMessage
+	usersManager    *users.Manager
 
 	wg              *sync.WaitGroup
 	shutdownChannel chan interface{}
 	metrics         Metrics
 
 	maxSubDataCount uint
+	authorizedUsers map[int64]bool 
 }
 
-func InitTelegramBot() *TelegramBot {
+func InitTelegramBot(authUsers map[int64]bool) *TelegramBot {
 	token := os.Getenv("TELEGRAM_BOT_TOKEN")
 	if token == "" {
 		log.Fatalf("TELEGRAM_BOT_TOKEN does not set")
@@ -46,6 +47,7 @@ func InitTelegramBot() *TelegramBot {
 		metrics:         InitPrometheusMetrics(),
 		wg:              &sync.WaitGroup{},
 		shutdownChannel: make(chan interface{}),
+		authorizedUsers: authUsers,
 	}
 
 	if os.Getenv("BOT_DEBUG") == "true" {
@@ -72,22 +74,16 @@ func InitTelegramBot() *TelegramBot {
 	prometheus.MustRegister(mqtt.GetPrometheusMetrics()...)
 	go bot.StartPprofAndMetricsListener()
 
-	log.Printf("Successfully init Telegram Bot")
+	log.Printf("Successfully init Telegram Bot with %d authorized users", len(authUsers))
 
 	var numListenGoroutines int
 	if os.Getenv("NUM_LISTEN_GOROUTINES") != "" {
-		numListenGoroutines, err = strconv.Atoi(os.Getenv("NUM_LISTEN_GOROUTINES"))
-		if err != nil {
-			log.Printf("Bad NUM_LISTEN_GOROUTINES env: %v", err)
-		}
+		numListenGoroutines, _ = strconv.Atoi(os.Getenv("NUM_LISTEN_GOROUTINES"))
 	}
 
 	if numListenGoroutines == 0 {
 		numListenGoroutines = runtime.NumCPU()
-		log.Printf("NUM_LISTEN_GOROUTINES is not set, by default will use NumCPU(%v) goroutines", numListenGoroutines)
 	}
-
-	log.Printf("Running %v listeners", numListenGoroutines)
 
 	for i := 0; i < numListenGoroutines; i++ {
 		bot.wg.Add(1)
@@ -98,13 +94,10 @@ func InitTelegramBot() *TelegramBot {
 }
 
 func (bot *TelegramBot) Shutdown() {
-	log.Printf("Telegram Bot received shutdown signal, will close all listeners")
-
 	bot.StopReceivingUpdates()
 	close(bot.shutdownChannel)
-
-	sqlDB, err := bot.db.DB()
-	if err == nil {
+	sqlDB, _ := bot.db.DB()
+	if sqlDB != nil {
 		sqlDB.Close()
 	}
 }

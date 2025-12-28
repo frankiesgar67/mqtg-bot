@@ -243,6 +243,14 @@ func GetSubscriptionEditKeyboard(subscription *models.Subscription, subscription
 					Action:   callback_data.ActionType_AFTER_VALUE_TEXT,
 				}.GetBase64ProtoString()),
 		),
+		// --- RIGA AGGIUNTA PER EXPORT Data CSV---
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				"📊 Esporta Storico CSV", 
+				fmt.Sprintf("export_%d", subscription.ID)),
+		),
+        // --------------------------------
+
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(
 				keyboard_names.EDIT_TOPIC,
